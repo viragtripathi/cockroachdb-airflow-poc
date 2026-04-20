@@ -1,0 +1,32 @@
+###############################################################################
+# Custom Airflow image with CockroachDB support
+#
+# Extends the official Airflow image to include:
+#   - sqlalchemy-cockroachdb (CockroachDB SQLAlchemy dialect)
+#   - psycopg2-binary (sync driver for CockroachDB dialect)
+#   - asyncpg (async driver — required by Airflow 3.x async engine)
+#
+# All versions are parameterized via build args.
+###############################################################################
+
+ARG AIRFLOW_VERSION=3.2.0
+ARG AIRFLOW_PYTHON_VERSION=3.12
+
+FROM apache/airflow:${AIRFLOW_VERSION}-python${AIRFLOW_PYTHON_VERSION}
+
+ARG SQLALCHEMY_COCKROACHDB_VERSION=2.0.3
+ARG PSYCOPG2_VERSION=2.9
+ARG ASYNCPG_VERSION=0.30
+
+USER airflow
+
+# Airflow 3.x creates both sync and async SQLAlchemy engines.
+# - psycopg2-binary: sync driver (cockroachdb+psycopg2://)
+# - asyncpg: async driver (cockroachdb+asyncpg://)
+RUN pip install --no-cache-dir \
+    "sqlalchemy-cockroachdb>=${SQLALCHEMY_COCKROACHDB_VERSION}" \
+    "psycopg2-binary>=${PSYCOPG2_VERSION}" \
+    "asyncpg>=${ASYNCPG_VERSION}"
+
+# Add src directory to PYTHONPATH so CockroachDB compatibility modules can be imported
+ENV PYTHONPATH="/opt/airflow/src:${PYTHONPATH}"

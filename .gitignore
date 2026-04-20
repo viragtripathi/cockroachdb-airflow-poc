@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.env
+.venv
+venv/
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local-only — not for public repo
+docs/
+audit-reports/
+.idea/
