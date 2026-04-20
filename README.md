@@ -182,7 +182,7 @@ python -m pytest tests/ -v
 2. ~~Audit migrations~~ ✅ — 111 files audited, 12 findings, all handled
 3. ~~Submit sqlalchemy-cockroachdb PR~~ ✅ — `@compiles(timestampdiff, "cockroachdb")` open at [PR #301](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301)
 4. ~~Open Airflow GitHub Discussion~~ ✅ — [#65453](https://github.com/apache/airflow/discussions/65453); maintainer guidance was to take it to the devlist first
-5. **Send `[DISCUSS]` to `dev@airflow.apache.org`** — propose the three small upstream changes (40001 retry, async-driver mapping, migration 0042 UUID fallback)
+5. ~~Send `[DISCUSS]` to `dev@airflow.apache.org`~~ ✅ — sent 2026-04-18; thread at [lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc](https://lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc). Awaiting maintainer feedback before drafting the three PRs.
 6. **Submit Airflow PRs after devlist signal** — three narrow PRs framed as PostgreSQL-compatibility improvements
 7. **Track CockroachDB advisory-lock support** — would enable scheduler HA coordination without retry-loop overhead
 
