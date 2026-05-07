@@ -9,12 +9,12 @@
 #   ./scripts/audit-airflow-migrations.sh [airflow_version]
 #
 # Example:
-#   ./scripts/audit-airflow-migrations.sh 3.2.0
+#   ./scripts/audit-airflow-migrations.sh 3.2.1
 ###############################################################################
 
 set -euo pipefail
 
-AIRFLOW_VERSION="${1:-3.2.0}"
+AIRFLOW_VERSION="${1:-3.2.1}"
 WORK_DIR=$(mktemp -d)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"

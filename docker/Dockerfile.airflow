@@ -9,12 +9,14 @@
 # All versions are parameterized via build args.
 ###############################################################################
 
-ARG AIRFLOW_VERSION=3.2.0
+ARG AIRFLOW_VERSION=3.2.1
 ARG AIRFLOW_PYTHON_VERSION=3.12
 
 FROM apache/airflow:${AIRFLOW_VERSION}-python${AIRFLOW_PYTHON_VERSION}
 
-ARG SQLALCHEMY_COCKROACHDB_VERSION=2.0.3
+# sqlalchemy-cockroachdb >= 2.0.4 ships the timestampdiff() compiler natively;
+# no plugin / src-side workaround needed for that path anymore.
+ARG SQLALCHEMY_COCKROACHDB_VERSION=2.0.4
 ARG PSYCOPG2_VERSION=2.9
 ARG ASYNCPG_VERSION=0.30
 

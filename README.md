@@ -5,7 +5,7 @@ Proof-of-concept for using CockroachDB with Apache Airflow 3.x in two ways:
 1. **Metadata Backend** — Replace PostgreSQL as Airflow's internal database
 2. **Data Source** — Query/write CockroachDB from DAG workflows via a provider package
 
-> **Status:** Proof-of-concept, not a supported product. The integration works end-to-end on Airflow 3.2.0 + CockroachDB v25.4 LTS with the workarounds documented here. For the upstream conversation, see Airflow [discussion #65453](https://github.com/apache/airflow/discussions/65453) and [`cockroachdb/sqlalchemy-cockroachdb#301`](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301).
+> **Status:** Proof-of-concept, not a supported product. The integration works end-to-end on Airflow 3.2.1 + CockroachDB v25.4 LTS with the workarounds documented here. The MySQL-style `timestampdiff()` workaround was upstreamed in [`cockroachdb/sqlalchemy-cockroachdb#301`](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301) and ships in `sqlalchemy-cockroachdb >= 2.0.4`. For the remaining items see Airflow [discussion #65453](https://github.com/apache/airflow/discussions/65453).
 
 ## Motivation
 
@@ -30,17 +30,15 @@ cockroachdb-airflow-poc/
 │   └── Dockerfile.airflow                 # Custom Airflow image with CRDB dialect
 ├── src/
 │   ├── compatibility/                     # CockroachDB compatibility layer
-│   │   ├── cockroachdb_sqlalchemy_plugin.py  # timestampdiff compiler extension
 │   │   ├── retry_middleware.py            # Transaction retry on 40001 errors
-│   │   └── migration_utils.py            # Audit Airflow migrations for CRDB compat
+│   │   └── migration_utils.py             # Audit Airflow migrations for CRDB compat
 │   ├── provider/                          # Airflow provider package prototype
 │   │   ├── hooks/cockroachdb.py           # CockroachDB Hook (DbApiHook)
 │   │   ├── dialects/cockroachdb.py        # CockroachDB Dialect (upsert, introspection)
 │   │   └── assets/cockroachdb.py          # URI sanitizer
 │   └── tests/
 │       └── test_cockroachdb_hook.py
-├── plugins/
-│   └── cockroachdb_compat_plugin.py       # Airflow plugin loader for compiler extensions
+├── plugins/                               # Airflow plugins dir (bind-mounted; empty by default)
 ├── scripts/
 │   ├── validate-poc.sh                    # End-to-end PoC validation
 │   └── audit-airflow-migrations.sh        # Scan migrations for CRDB incompatibilities
@@ -70,10 +68,10 @@ Defaults (work out of the box):
 
 ```bash
 # docker/.env
-COCKROACHDB_VERSION=v25.4.8
-AIRFLOW_VERSION=3.2.0
+COCKROACHDB_VERSION=v25.4.9
+AIRFLOW_VERSION=3.2.1
 AIRFLOW_PYTHON_VERSION=3.12
-SQLALCHEMY_COCKROACHDB_VERSION=2.0.3
+SQLALCHEMY_COCKROACHDB_VERSION=2.0.4
 ```
 
 ### 2. Start the Stack
@@ -95,8 +93,9 @@ The init process automatically:
 3. Enables READ COMMITTED isolation (avoids scheduler crashes on 40001 errors)
 4. Creates `uuid_generate_v7()` compatibility function
 5. Runs `airflow db migrate` against CockroachDB (retries on DDL visibility race)
-6. Loads the SQLAlchemy compiler plugin for `timestampdiff` compatibility
-7. Configures admin user via SimpleAuthManager (Airflow 3.x)
+6. Configures admin user via SimpleAuthManager (Airflow 3.x)
+
+`timestampdiff()` no longer needs an Airflow-side workaround — `sqlalchemy-cockroachdb >= 2.0.4` compiles it natively.
 
 ### 3. Access the UIs
 
@@ -125,7 +124,7 @@ In the Airflow UI, enable and trigger the `cockroachdb_demo` DAG.
 | Isolation level | `READ COMMITTED` | Avoid 40001 scheduler crashes (SERIALIZABLE causes `WriteTooOldError` under contention) |
 | `uuid_generate_v7()` UDF | `gen_random_uuid()` wrapper | Airflow 3.x migration compat |
 | `SQL_ALCHEMY_CONN_ASYNC` | `cockroachdb+asyncpg://` | Airflow 3.x requires async engine (auto-derivation doesn't support `cockroachdb://` scheme) |
-| Compiler plugin | `cockroachdb_compat_plugin.py` | Translates `timestampdiff()` to `EXTRACT(EPOCH FROM ...)` with NUMERIC cast |
+| `timestampdiff()` | Compiled natively by `sqlalchemy-cockroachdb >= 2.0.4` | Translates to `TRUNC(CAST(EXTRACT(EPOCH FROM ...) AS NUMERIC) <factor>)`, matching MySQL's integer-truncation semantics |
 
 ### Data Source Configuration
 
@@ -144,7 +143,7 @@ In the Airflow UI, enable and trigger the `cockroachdb_demo` DAG.
 - ✅ Task execution (LocalExecutor) with correct output
 - ✅ Airflow UI (API server, DAG grid)
 - ✅ Example DAGs with CockroachDB CRUD + distributed SQL
-- ✅ SQLAlchemy compiler plugin for `timestampdiff` compatibility
+- ✅ MySQL-style `timestampdiff()` (compiled natively by `sqlalchemy-cockroachdb >= 2.0.4`)
 - ✅ CockroachDB provider package (Hook, Dialect, Asset URI)
 
 ### Known Limitations
@@ -157,7 +156,7 @@ In the Airflow UI, enable and trigger the `cockroachdb_demo` DAG.
 Scan Airflow's Alembic migrations for CockroachDB-incompatible patterns:
 
 ```bash
-./scripts/audit-airflow-migrations.sh 3.2.0
+./scripts/audit-airflow-migrations.sh 3.2.1
 ```
 
 ## Running Tests
@@ -180,7 +179,7 @@ python -m pytest tests/ -v
 
 1. ~~Run the PoC~~ ✅ — `airflow db migrate` succeeds, DAGs execute correctly
 2. ~~Audit migrations~~ ✅ — 111 files audited, 12 findings, all handled
-3. ~~Submit sqlalchemy-cockroachdb PR~~ ✅ — `@compiles(timestampdiff, "cockroachdb")` open at [PR #301](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301)
+3. ~~Submit sqlalchemy-cockroachdb PR~~ ✅ — [PR #301](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301) merged; `@compiles(timestampdiff, "cockroachdb")` ships in `sqlalchemy-cockroachdb >= 2.0.4`
 4. ~~Open Airflow GitHub Discussion~~ ✅ — [#65453](https://github.com/apache/airflow/discussions/65453); maintainer guidance was to take it to the devlist first
 5. ~~Send `[DISCUSS]` to `dev@airflow.apache.org`~~ ✅ — sent 2026-04-18; thread at [lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc](https://lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc). Awaiting maintainer feedback before drafting the three PRs.
 6. **Submit Airflow PRs after devlist signal** — three narrow PRs framed as PostgreSQL-compatibility improvements

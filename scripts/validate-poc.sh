@@ -33,26 +33,30 @@ check() {
 
     printf "%-50s " "$description"
 
-    output=$(eval "$command" 2>&1) || true
+    # Capture the command's exit code immediately; ``$?`` would otherwise be
+    # clobbered by the ``[ -n "$expected" ]`` test below, which silently broke
+    # every check that passed an empty expected string.
+    local rc=0
+    output=$(eval "$command" 2>&1) || rc=$?
 
     if [ -n "$expected" ]; then
         if echo "$output" | grep -qi "$expected"; then
             echo -e "${GREEN}PASS${NC}"
-            ((PASS++))
+            PASS=$((PASS+1))
         else
             echo -e "${RED}FAIL${NC}"
             echo "  Expected: $expected"
             echo "  Got: $output"
-            ((FAIL++))
+            FAIL=$((FAIL+1))
         fi
     else
-        if [ $? -eq 0 ] && [ -n "$output" ]; then
+        if [ $rc -eq 0 ] && [ -n "$output" ]; then
             echo -e "${GREEN}PASS${NC} ($output)"
-            ((PASS++))
+            PASS=$((PASS+1))
         else
             echo -e "${RED}FAIL${NC}"
             echo "  Output: $output"
-            ((FAIL++))
+            FAIL=$((FAIL+1))
         fi
     fi
 }
@@ -62,6 +66,20 @@ echo "  CockroachDB + Airflow PoC Validation"
 echo "============================================================"
 echo ""
 
+# Resolve the metadata-database name the same way docker-compose does, so
+# the queries below target whatever database the stack is actually using.
+# (.env values are layered under shell env to mirror docker-compose's
+# ``${VAR:-default}`` resolution order.)
+if [ -f docker/.env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . docker/.env
+    set +a
+fi
+AIRFLOW_METADATA_DB="${AIRFLOW_METADATA_DB:-airflow}"
+echo "Using metadata database: ${AIRFLOW_METADATA_DB}"
+echo ""
+
 # --- CockroachDB Checks ---
 echo "--- CockroachDB ---"
 
@@ -69,9 +87,9 @@ check "CockroachDB is reachable" \
     "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e 'SELECT 1'" \
     "1"
 
-check "Airflow database exists" \
-    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SELECT datname FROM pg_database WHERE datname='airflow'\"" \
-    "airflow"
+check "Airflow metadata database exists" \
+    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SELECT datname FROM pg_database WHERE datname='${AIRFLOW_METADATA_DB}'\"" \
+    "${AIRFLOW_METADATA_DB}"
 
 check "Serial normalization is sql_sequence" \
     "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SHOW CLUSTER SETTING sql.defaults.serial_normalization\"" \
@@ -79,7 +97,7 @@ check "Serial normalization is sql_sequence" \
 
 check "READ COMMITTED enabled" \
     "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SHOW CLUSTER SETTING sql.txn.read_committed_isolation.enabled\"" \
-    "true"
+    "^t$"
 
 check "CockroachDB version" \
     "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SELECT value FROM crdb_internal.node_build_info WHERE field = 'Tag'\"" \
@@ -91,19 +109,19 @@ echo ""
 echo "--- Airflow Metadata (in CockroachDB) ---"
 
 check "Airflow tables exist in CockroachDB" \
-    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=airflow -e \"SELECT count(*) FROM information_schema.tables WHERE table_schema='public'\"" \
+    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=${AIRFLOW_METADATA_DB} -e \"SELECT count(*) FROM information_schema.tables WHERE table_schema='public'\"" \
     ""
 
 check "dag table exists" \
-    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=airflow -e \"SELECT count(*) FROM information_schema.tables WHERE table_name='dag'\"" \
+    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=${AIRFLOW_METADATA_DB} -e \"SELECT count(*) FROM information_schema.tables WHERE table_name='dag'\"" \
     "1"
 
 check "task_instance table exists" \
-    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=airflow -e \"SELECT count(*) FROM information_schema.tables WHERE table_name='task_instance'\"" \
+    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=${AIRFLOW_METADATA_DB} -e \"SELECT count(*) FROM information_schema.tables WHERE table_name='task_instance'\"" \
     "1"
 
 check "alembic_version populated" \
-    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=airflow -e \"SELECT version_num FROM alembic_version LIMIT 1\"" \
+    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=${AIRFLOW_METADATA_DB} -e \"SELECT version_num FROM alembic_version LIMIT 1\"" \
     ""
 
 echo ""
@@ -117,7 +135,7 @@ check "Airflow API server healthy" \
 
 check "Airflow scheduler running" \
     "docker compose -f docker/docker-compose.yml ps --format '{{.Service}} {{.Status}}' | grep scheduler" \
-    "running"
+    "Up"
 
 echo ""
 
