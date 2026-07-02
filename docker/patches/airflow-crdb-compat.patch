@@ -1,5 +1,5 @@
 diff --git a/airflow-core/src/airflow/jobs/scheduler_job_runner.py b/airflow-core/src/airflow/jobs/scheduler_job_runner.py
-index f1db8fb1a6..2655f5aaa2 100644
+index f1db8fb1a6..569dfff090 100644
 --- a/airflow-core/src/airflow/jobs/scheduler_job_runner.py
 +++ b/airflow-core/src/airflow/jobs/scheduler_job_runner.py
 @@ -124,6 +124,7 @@ from airflow.utils.session import NEW_SESSION, create_session, provide_session
@@ -10,16 +10,22 @@ index f1db8fb1a6..2655f5aaa2 100644
      prohibit_commit,
      random_db_uuid,
      with_row_locks,
-@@ -542,7 +543,8 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
+@@ -542,10 +543,11 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
  
          executable_tis: list[TI] = []
  
 -        if get_dialect_name(session) == "postgresql":
+-            # Optimization: to avoid littering the DB errors of "ERROR: canceling statement due to lock
+-            # timeout", try to take out a transactional advisory lock (unlocks automatically on
+-            # COMMIT/ROLLBACK)
 +        if get_dialect_name(session) in ("postgresql", "cockroachdb"):
-+            # PostgreSQL-compatible databases with transaction-level advisory locks (PostgreSQL, CockroachDB 26.3+).
-             # Optimization: to avoid littering the DB errors of "ERROR: canceling statement due to lock
-             # timeout", try to take out a transactional advisory lock (unlocks automatically on
-             # COMMIT/ROLLBACK)
++            # Transaction-level advisory lock optimization, available on PostgreSQL and
++            # CockroachDB 26.3+. Taking a transactional advisory lock (which unlocks
++            # automatically on COMMIT/ROLLBACK) avoids littering the DB with
++            # "ERROR: canceling statement due to lock timeout" errors.
+             lock_acquired = session.execute(
+                 text("SELECT pg_try_advisory_xact_lock(:id)").bindparams(
+                     id=DBLocks.SCHEDULER_CRITICAL_SECTION.value
 @@ -1937,7 +1939,12 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                  # We know we can't do anything here, so don't even try!
                  self.log.debug("All executors are full, skipping critical section")
@@ -67,7 +73,7 @@ index f1db8fb1a6..2655f5aaa2 100644
  
      def _warn_unreachable_asset_partition(
 diff --git a/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py b/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
-index 680d97301f..7ccd607be7 100644
+index 680d97301f..68cfaa390e 100644
 --- a/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
 +++ b/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
 @@ -160,8 +160,9 @@ ti_fk_constraints = [
@@ -82,7 +88,7 @@ index 680d97301f..7ccd607be7 100644
          return postgresql.UUID(as_uuid=False)
      # For other databases, use String(36) to match UUID format
      return sa.String(36)
-@@ -275,11 +276,61 @@ def upgrade():
+@@ -275,11 +276,90 @@ def upgrade():
          with op.batch_alter_table("task_instance") as batch_op:
              batch_op.drop_constraint("task_instance_pkey", type_="primary")
  
@@ -91,12 +97,22 @@ index 680d97301f..7ccd607be7 100644
 +
 +        # CockroachDB has no pgcrypto extension, so generate UUID v7 values
 +        # client-side like the sqlite path. There is no sqlite-style rowid, so
-+        # batch on the existing composite primary key instead.
++        # paginate over the existing composite primary key; every row needs an
++        # id at this point, which keeps the scan a single forward pass.
 +        select_stmt = text(
 +            """
 +            SELECT dag_id, task_id, run_id, map_index
 +            FROM task_instance
-+            WHERE id IS NULL
++            WHERE (dag_id, task_id, run_id, map_index) > (:last_dag_id, :last_task_id, :last_run_id, :last_map_index)
++            ORDER BY dag_id, task_id, run_id, map_index
++            LIMIT :batch_size
++            """
++        )
++        first_select_stmt = text(
++            """
++            SELECT dag_id, task_id, run_id, map_index
++            FROM task_instance
++            ORDER BY dag_id, task_id, run_id, map_index
 +            LIMIT :batch_size
 +            """
 +        )
@@ -108,20 +124,39 @@ index 680d97301f..7ccd607be7 100644
 +              AND run_id = :run_id AND map_index = :map_index
 +            """
 +        )
++        batch_num = 0
++        last_key = None
 +        while True:
-+            rows = conn.execute(select_stmt.bindparams(batch_size=batch_size)).fetchall()
++            batch_num += 1
++            if last_key is None:
++                rows = conn.execute(first_select_stmt.bindparams(batch_size=batch_size)).fetchall()
++            else:
++                rows = conn.execute(
++                    select_stmt.bindparams(
++                        batch_size=batch_size,
++                        last_dag_id=last_key.dag_id,
++                        last_task_id=last_key.task_id,
++                        last_run_id=last_key.run_id,
++                        last_map_index=last_key.map_index,
++                    )
++                ).fetchall()
 +            if not rows:
 +                break
-+            for row in rows:
-+                conn.execute(
-+                    update_stmt.bindparams(
-+                        uuid=str(uuid7()),
-+                        dag_id=row.dag_id,
-+                        task_id=row.task_id,
-+                        run_id=row.run_id,
-+                        map_index=row.map_index,
-+                    )
-+                )
++            conn.execute(
++                update_stmt,
++                [
++                    {
++                        "uuid": str(uuid7()),
++                        "dag_id": row.dag_id,
++                        "task_id": row.task_id,
++                        "run_id": row.run_id,
++                        "map_index": row.map_index,
++                    }
++                    for row in rows
++                ],
++            )
++            last_key = rows[-1]
++            print(f"Migrated {len(rows)} task_instance rows in batch {batch_num}...")
 +
 +        for fk in ti_fk_constraints:
 +            op.drop_constraint(fk["fk"], fk["table"], type_="foreignkey")
@@ -148,7 +183,7 @@ index 680d97301f..7ccd607be7 100644
  
      # Create foreign key constraints
      create_foreign_keys()
-@@ -306,6 +357,17 @@ def downgrade():
+@@ -306,6 +386,17 @@ def downgrade():
          with op.batch_alter_table("task_instance") as batch_op:
              batch_op.drop_constraint("task_instance_composite_key", type_="unique")
  
