@@ -71,14 +71,25 @@ echo "============================================================"
 echo ""
 
 # Resolve the metadata-database name and isolation mode the same way docker-compose does.
-# (.env values are layered under shell env to mirror docker-compose's
-# ``${VAR:-default}`` resolution order.)
+# Command-line env vars take precedence over .env file (same as docker-compose).
+SAVED_CRDB_ISOLATION="${CRDB_ISOLATION:-}"
+SAVED_AIRFLOW_METADATA_DB="${AIRFLOW_METADATA_DB:-}"
+
 if [ -f docker/.env ]; then
     set -a
     # shellcheck disable=SC1091
     . docker/.env
     set +a
 fi
+
+# Restore command-line values if they were provided
+if [ -n "$SAVED_CRDB_ISOLATION" ]; then
+    CRDB_ISOLATION="$SAVED_CRDB_ISOLATION"
+fi
+if [ -n "$SAVED_AIRFLOW_METADATA_DB" ]; then
+    AIRFLOW_METADATA_DB="$SAVED_AIRFLOW_METADATA_DB"
+fi
+
 AIRFLOW_METADATA_DB="${AIRFLOW_METADATA_DB:-airflow}"
 CRDB_ISOLATION="${CRDB_ISOLATION:-serializable}"
 echo "Metadata database: ${AIRFLOW_METADATA_DB}"
@@ -110,6 +121,38 @@ check "Serial normalization is sql_sequence" \
 check "READ COMMITTED enabled" \
     "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SHOW CLUSTER SETTING sql.txn.read_committed_isolation.enabled\"" \
     "^t$"
+
+check "Airflow user exists" \
+    "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure -e \"SELECT usename FROM pg_user WHERE usename='airflow'\"" \
+    "airflow"
+
+# Check isolation level at BEGIN for the airflow user
+echo ""
+echo "  Checking isolation level for airflow user at BEGIN..."
+ISOLATION_LEVEL=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server python -c "
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+conn = psycopg2.connect('postgresql://airflow@cockroachdb:26257/${AIRFLOW_METADATA_DB}?sslmode=disable')
+conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+cur = conn.cursor()
+cur.execute('BEGIN')
+cur.execute('SHOW transaction_isolation')
+level = cur.fetchone()[0]
+cur.execute('COMMIT')
+conn.close()
+print(level)
+" 2>/dev/null | tr -d '\r')
+
+EXPECTED_ISOLATION=""
+if [ "${CRDB_ISOLATION}" = "serializable" ]; then
+    EXPECTED_ISOLATION="serializable"
+else
+    EXPECTED_ISOLATION="read committed"
+fi
+
+check "Airflow user BEGIN uses ${EXPECTED_ISOLATION}" \
+    "echo \"${ISOLATION_LEVEL}\"" \
+    "${EXPECTED_ISOLATION}"
 
 check "CockroachDB version" \
     "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach version | grep 'Build Tag' | awk '{print \$NF}'" \

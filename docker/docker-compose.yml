@@ -26,7 +26,7 @@ x-airflow-common: &airflow-common
   environment: &airflow-env
     # Sync engine (psycopg2)
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-      cockroachdb://root@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable
+      cockroachdb://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable
     AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
     AIRFLOW__CORE__LOAD_EXAMPLES: "${AIRFLOW_LOAD_EXAMPLES:-false}"
     # Airflow 3.x moved secret_key from [webserver] to [api]
@@ -46,7 +46,7 @@ x-airflow-common: &airflow-common
     # SimpleAuthManager (default in Airflow 3.x) — users configured via env var
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USER:-admin}:admin"
     # Pre-configure the CockroachDB connection for example DAGs
-    AIRFLOW_CONN_COCKROACHDB_DEFAULT: "postgresql://root@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable"
+    AIRFLOW_CONN_COCKROACHDB_DEFAULT: "postgresql://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable"
   volumes:
     - ../examples/dags:/opt/airflow/dags
     - ../src:/opt/airflow/src
@@ -100,6 +100,10 @@ services:
           -- Match PostgreSQL SERIAL behavior for Airflow compatibility
           SET CLUSTER SETTING sql.defaults.serial_normalization = 'sql_sequence';
         "
+        echo "Creating airflow database user..."
+        cockroach sql --insecure --host=cockroachdb:26257 -e "CREATE USER IF NOT EXISTS airflow;"
+        cockroach sql --insecure --host=cockroachdb:26257 -e "GRANT ALL ON DATABASE ${AIRFLOW_METADATA_DB:-airflow} TO airflow WITH GRANT OPTION;"
+        cockroach sql --insecure --host=cockroachdb:26257 -e "ALTER DATABASE ${AIRFLOW_METADATA_DB:-airflow} OWNER TO airflow;"
         if [ "${CRDB_ISOLATION:-serializable}" = "read_committed" ]; then
           echo "Enabling READ COMMITTED isolation..."
           cockroach sql --insecure --host=cockroachdb:26257 -e "SET CLUSTER SETTING sql.txn.read_committed_isolation.enabled = true";
