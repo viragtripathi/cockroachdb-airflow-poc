@@ -53,7 +53,7 @@ index f1db8fb1a6..2655f5aaa2 100644
 +                            "Critical section hit a database serialization conflict, "
 +                            "will retry on the next scheduler loop"
 +                        )
-+                        stats.incr("scheduler.critical_section_conflict")
++                        Stats.incr("scheduler.critical_section_conflict")
 +                        session.rollback()
 +                        for executor, keys_before in queued_keys_before.items():
 +                            for key in set(executor.queued_tasks) - keys_before:
