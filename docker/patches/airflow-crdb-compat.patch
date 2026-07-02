@@ -1,0 +1,179 @@
+diff --git a/airflow-core/src/airflow/jobs/scheduler_job_runner.py b/airflow-core/src/airflow/jobs/scheduler_job_runner.py
+index f1db8fb1a6..1536cd22bc 100644
+--- a/airflow-core/src/airflow/jobs/scheduler_job_runner.py
++++ b/airflow-core/src/airflow/jobs/scheduler_job_runner.py
+@@ -124,6 +124,7 @@ from airflow.utils.session import NEW_SESSION, create_session, provide_session
+ from airflow.utils.sqlalchemy import (
+     get_dialect_name,
+     is_lock_not_available_error,
++    is_serialization_error,
+     prohibit_commit,
+     random_db_uuid,
+     with_row_locks,
+@@ -542,7 +543,8 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
+ 
+         executable_tis: list[TI] = []
+ 
+-        if get_dialect_name(session) == "postgresql":
++        if get_dialect_name(session) in ("postgresql", "cockroachdb"):
++            # PostgreSQL-compatible databases with transaction-level advisory locks (PostgreSQL, CockroachDB 26.3+).
+             # Optimization: to avoid littering the DB errors of "ERROR: canceling statement due to lock
+             # timeout", try to take out a transactional advisory lock (unlocks automatically on
+             # COMMIT/ROLLBACK)
+@@ -1956,6 +1958,14 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
+                         stats.incr("scheduler.critical_section_busy")
+                         session.rollback()
+                         return 0
++                    if is_serialization_error(error=e):
++                        self.log.debug(
++                            "Critical section hit a database serialization conflict, "
++                            "will retry on the next scheduler loop"
++                        )
++                        stats.incr("scheduler.critical_section_conflict")
++                        session.rollback()
++                        return 0
+                     raise
+ 
+             guard.commit()
+diff --git a/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py b/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
+index 680d97301f..7ccd607be7 100644
+--- a/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
++++ b/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
+@@ -160,8 +160,9 @@ ti_fk_constraints = [
+ 
+ 
+ def _get_type_id_column(dialect_name: str) -> sa.types.TypeEngine:
+-    # For PostgreSQL, use the UUID type directly as it is more efficient
+-    if dialect_name == "postgresql":
++    # For PostgreSQL-family databases, use the UUID type directly as it is more efficient
++    # and matches what the ORM's sa.Uuid() renders on these dialects.
++    if dialect_name in ("postgresql", "cockroachdb"):
+         return postgresql.UUID(as_uuid=False)
+     # For other databases, use String(36) to match UUID format
+     return sa.String(36)
+@@ -275,11 +276,61 @@ def upgrade():
+         with op.batch_alter_table("task_instance") as batch_op:
+             batch_op.drop_constraint("task_instance_pkey", type_="primary")
+ 
++    elif dialect_name == "cockroachdb":
++        from uuid6 import uuid7
++
++        # CockroachDB has no pgcrypto extension, so generate UUID v7 values
++        # client-side like the sqlite path. There is no sqlite-style rowid, so
++        # batch on the existing composite primary key instead.
++        select_stmt = text(
++            """
++            SELECT dag_id, task_id, run_id, map_index
++            FROM task_instance
++            WHERE id IS NULL
++            LIMIT :batch_size
++            """
++        )
++        update_stmt = text(
++            """
++            UPDATE task_instance
++            SET id = :uuid
++            WHERE dag_id = :dag_id AND task_id = :task_id
++              AND run_id = :run_id AND map_index = :map_index
++            """
++        )
++        while True:
++            rows = conn.execute(select_stmt.bindparams(batch_size=batch_size)).fetchall()
++            if not rows:
++                break
++            for row in rows:
++                conn.execute(
++                    update_stmt.bindparams(
++                        uuid=str(uuid7()),
++                        dag_id=row.dag_id,
++                        task_id=row.task_id,
++                        run_id=row.run_id,
++                        map_index=row.map_index,
++                    )
++                )
++
++        for fk in ti_fk_constraints:
++            op.drop_constraint(fk["fk"], fk["table"], type_="foreignkey")
++
+     # Add primary key and unique constraint to task_instance table
+-    with op.batch_alter_table("task_instance") as batch_op:
+-        batch_op.alter_column("id", type_=_get_type_id_column(dialect_name), nullable=False)
+-        batch_op.create_unique_constraint("task_instance_composite_key", ti_fk_cols)
+-        batch_op.create_primary_key("task_instance_pkey", ["id"])
++    if dialect_name == "cockroachdb":
++        # CockroachDB cannot drop a primary key without a replacement in the
++        # same statement, so swap it atomically. The composite unique
++        # constraint is created first so the swapped-out key columns stay
++        # backed by an index for the foreign keys recreated below.
++        op.alter_column("task_instance", "id", type_=_get_type_id_column(dialect_name), nullable=False)
++        op.create_unique_constraint("task_instance_composite_key", "task_instance", ti_fk_cols)
++        op.execute("ALTER TABLE task_instance ALTER PRIMARY KEY USING COLUMNS (id)")
++    else:
++        # Add primary key and unique constraint to task_instance table
++        with op.batch_alter_table("task_instance") as batch_op:
++            batch_op.alter_column("id", type_=_get_type_id_column(dialect_name), nullable=False)
++            batch_op.create_unique_constraint("task_instance_composite_key", ti_fk_cols)
++            batch_op.create_primary_key("task_instance_pkey", ["id"])
+ 
+     # Create foreign key constraints
+     create_foreign_keys()
+@@ -306,6 +357,17 @@ def downgrade():
+         with op.batch_alter_table("task_instance") as batch_op:
+             batch_op.drop_constraint("task_instance_composite_key", type_="unique")
+ 
++    elif dialect_name == "cockroachdb":
++        for fk in ti_fk_constraints:
++            op.drop_constraint(fk["fk"], fk["table"], type_="foreignkey")
++        op.execute(
++            "ALTER TABLE task_instance ALTER PRIMARY KEY USING COLUMNS (dag_id, task_id, run_id, map_index)"
++        )
++        op.drop_constraint("task_instance_composite_key", "task_instance", type_="unique")
++        op.drop_column("task_instance", "id")
++        create_foreign_keys()
++        return
++
+     with op.batch_alter_table("task_instance") as batch_op:
+         batch_op.drop_constraint("task_instance_pkey", type_="primary")
+         batch_op.drop_column("id")
+diff --git a/airflow-core/src/airflow/settings.py b/airflow-core/src/airflow/settings.py
+index 56fc3d07ce..2c129c17a4 100644
+--- a/airflow-core/src/airflow/settings.py
++++ b/airflow-core/src/airflow/settings.py
+@@ -241,7 +241,12 @@ def load_policy_plugins(pm: pluggy.PluginManager):
+ 
+ 
+ def _get_async_conn_uri_from_sync(sync_uri):
+-    AIO_LIBS_MAPPING = {"sqlite": "aiosqlite", "postgresql": "asyncpg", "mysql": "aiomysql"}
++    AIO_LIBS_MAPPING = {
++        "sqlite": "aiosqlite",
++        "postgresql": "asyncpg",
++        "mysql": "aiomysql",
++        "cockroachdb": "asyncpg",
++    }
+     """Mapping of sync scheme to async scheme."""
+ 
+     scheme, rest = sync_uri.split(":", maxsplit=1)
+diff --git a/airflow-core/src/airflow/utils/sqlalchemy.py b/airflow-core/src/airflow/utils/sqlalchemy.py
+index c47d8fd479..51822edc62 100644
+--- a/airflow-core/src/airflow/utils/sqlalchemy.py
++++ b/airflow-core/src/airflow/utils/sqlalchemy.py
+@@ -595,6 +595,19 @@ def is_lock_not_available_error(error: OperationalError):
+     return False
+ 
+ 
++def is_serialization_error(error: OperationalError) -> bool:
++    """
++    Check if the error is a transaction serialization failure or deadlock.
++
++    PostgreSQL-compatible databases report these as SQLSTATE 40001
++    (serialization_failure) and 40P01 (deadlock_detected). Both are transient:
++    the transaction is safe to retry.
++    """
++    # psycopg2 exposes the SQLSTATE as pgcode, psycopg 3 as sqlstate
++    db_err_code = getattr(error.orig, "pgcode", None) or getattr(error.orig, "sqlstate", None)
++    return db_err_code in ("40001", "40P01")
++
++
+ def make_dialect_kwarg(dialect: str) -> dict[str, str | Iterable[str]]:
+     """Create an SQLAlchemy-version-aware dialect keyword argument."""
+     return {"dialect_names": (dialect,)}
