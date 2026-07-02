@@ -235,11 +235,10 @@ echo ""
 # --- HA Stress Test ---
 echo "--- HA Stress (8 runs x 30 tasks, dual schedulers) ---"
 echo ""
-echo "  NOTE: The current CockroachDB compat patch has an incomplete fix for"
-echo "        serialization conflicts. The try-except in scheduler_job_runner.py"
-echo "        wraps _critical_section_enqueue_task_instances but NOT guard.commit(),"
-echo "        so serialization conflicts during commit will still crash the scheduler."
-echo "        This test may expose that bug. Scheduler crashes are documented below."
+echo "  NOTE: The compat patch handles serialization conflicts in the scheduler"
+echo "        critical section, including commit-time conflicts (guard.commit is"
+echo "        inside the retry scope). Conflict counts below are informational;"
+echo "        any scheduler crash would be a regression and is documented below."
 echo ""
 
 # Unpause the stress DAG
@@ -270,8 +269,11 @@ LOCK_LOG=$(mktemp)
 LOCK_POLL_PID=$!
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    RUNNING_COUNT=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server airflow dags list-runs cockroachdb_stress --state running 2>/dev/null | grep -c '^cockroachdb_stress' || echo 0)
-    QUEUED_COUNT=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server airflow dags list-runs cockroachdb_stress --state queued 2>/dev/null | grep -c '^cockroachdb_stress' || echo 0)
+    # grep -c already prints 0 when nothing matches (while exiting 1), so use
+    # "|| true" here; "|| echo 0" would emit a second "0" line and break the
+    # integer comparisons below.
+    RUNNING_COUNT=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server airflow dags list-runs cockroachdb_stress --state running 2>/dev/null | grep -c '^cockroachdb_stress' || true)
+    QUEUED_COUNT=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server airflow dags list-runs cockroachdb_stress --state queued 2>/dev/null | grep -c '^cockroachdb_stress' || true)
 
     if [ "$RUNNING_COUNT" -eq 0 ] && [ "$QUEUED_COUNT" -eq 0 ]; then
         echo "All runs completed after ${ELAPSED}s"
@@ -291,7 +293,7 @@ if [ $ELAPSED -ge $TIMEOUT ]; then
     FAIL=$((FAIL+1))
 else
     # Check that all 8 runs succeeded
-    SUCCESS_COUNT=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server airflow dags list-runs cockroachdb_stress --state success 2>/dev/null | grep -c '^cockroachdb_stress' || echo 0)
+    SUCCESS_COUNT=$(docker compose -f docker/docker-compose.yml exec -T airflow-api-server airflow dags list-runs cockroachdb_stress --state success 2>/dev/null | grep -c '^cockroachdb_stress' || true)
 
     check "All 8 stress runs succeeded" \
         "echo $SUCCESS_COUNT" \
@@ -328,8 +330,8 @@ else
     fi
 
     # Count serialization conflicts in scheduler logs (informational)
-    SCHED1_CONFLICTS=$(docker compose -f docker/docker-compose.yml logs airflow-scheduler 2>/dev/null | grep -c "40001\|serialization" || echo 0)
-    SCHED2_CONFLICTS=$(docker compose -f docker/docker-compose.yml logs airflow-scheduler-2 2>/dev/null | grep -c "40001\|serialization" || echo 0)
+    SCHED1_CONFLICTS=$(docker compose -f docker/docker-compose.yml logs airflow-scheduler 2>/dev/null | grep -c "40001\|serialization" || true)
+    SCHED2_CONFLICTS=$(docker compose -f docker/docker-compose.yml logs airflow-scheduler-2 2>/dev/null | grep -c "40001\|serialization" || true)
 
     echo "  Scheduler 1 serialization conflicts: $SCHED1_CONFLICTS (informational)"
     echo "  Scheduler 2 serialization conflicts: $SCHED2_CONFLICTS (informational)"
