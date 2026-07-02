@@ -32,3 +32,13 @@ RUN pip install --no-cache-dir \
 
 # Add src directory to PYTHONPATH so CockroachDB compatibility modules can be imported
 ENV PYTHONPATH="/opt/airflow/src:${PYTHONPATH}"
+
+# Apply CockroachDB compatibility patch from apache/airflow upstream PRs
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends patch && rm -rf /var/lib/apt/lists/*
+USER airflow
+COPY patches/airflow-crdb-compat.patch /tmp/airflow-crdb-compat.patch
+RUN cd $(python -c "import airflow, os; print(os.path.dirname(os.path.dirname(airflow.__file__)))") \
+    && patch -p3 --forward < /tmp/airflow-crdb-compat.patch \
+    && python -c "from airflow.utils.sqlalchemy import is_serialization_error; print('patch OK')" \
+    && grep -q '"cockroachdb": "asyncpg"' airflow/settings.py
