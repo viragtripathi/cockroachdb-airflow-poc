@@ -1,5 +1,5 @@
 diff --git a/airflow-core/src/airflow/jobs/scheduler_job_runner.py b/airflow-core/src/airflow/jobs/scheduler_job_runner.py
-index f1db8fb1a6..1536cd22bc 100644
+index f1db8fb1a6..2655f5aaa2 100644
 --- a/airflow-core/src/airflow/jobs/scheduler_job_runner.py
 +++ b/airflow-core/src/airflow/jobs/scheduler_job_runner.py
 @@ -124,6 +124,7 @@ from airflow.utils.session import NEW_SESSION, create_session, provide_session
@@ -20,7 +20,31 @@ index f1db8fb1a6..1536cd22bc 100644
              # Optimization: to avoid littering the DB errors of "ERROR: canceling statement due to lock
              # timeout", try to take out a transactional advisory lock (unlocks automatically on
              # COMMIT/ROLLBACK)
-@@ -1956,6 +1958,14 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
+@@ -1937,7 +1939,12 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
+                 # We know we can't do anything here, so don't even try!
+                 self.log.debug("All executors are full, skipping critical section")
+                 num_queued_tis = 0
++                guard.commit()
+             else:
++                # Snapshot the executors' in-memory queues so a failed commit can discard
++                # exactly the workloads buffered in this round. They must not be dispatched
++                # if their QUEUED state never reached the database.
++                queued_keys_before = {executor: set(executor.queued_tasks) for executor in self.executors}
+                 try:
+                     timer = stats.timer("scheduler.critical_section_duration")
+                     timer.start()
+@@ -1948,6 +1955,10 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
+                     # Make sure we only sent this metric if we obtained the lock, otherwise we'll skew the
+                     # metric, way down
+                     timer.stop(send=True)
++
++                    # Serialization failures can surface at commit time as well, so the commit
++                    # must happen inside this handler.
++                    guard.commit()
+                 except OperationalError as e:
+                     timer.stop(send=False)
+ 
+@@ -1956,10 +1967,19 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                          stats.incr("scheduler.critical_section_busy")
                          session.rollback()
                          return 0
@@ -31,10 +55,17 @@ index f1db8fb1a6..1536cd22bc 100644
 +                        )
 +                        stats.incr("scheduler.critical_section_conflict")
 +                        session.rollback()
++                        for executor, keys_before in queued_keys_before.items():
++                            for key in set(executor.queued_tasks) - keys_before:
++                                del executor.queued_tasks[key]
 +                        return 0
                      raise
  
-             guard.commit()
+-            guard.commit()
+-
+         return num_queued_tis
+ 
+     def _warn_unreachable_asset_partition(
 diff --git a/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py b/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
 index 680d97301f..7ccd607be7 100644
 --- a/airflow-core/src/airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py
