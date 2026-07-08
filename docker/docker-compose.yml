@@ -23,10 +23,13 @@ x-airflow-common: &airflow-common
       SQLALCHEMY_COCKROACHDB_VERSION: ${SQLALCHEMY_COCKROACHDB_VERSION:-2.0.4}
       PSYCOPG2_VERSION: ${PSYCOPG2_VERSION:-2.9}
       ASYNCPG_VERSION: ${ASYNCPG_VERSION:-0.30}
+      APPLY_CRDB_PATCH: ${APPLY_CRDB_PATCH:-true}
   environment: &airflow-env
-    # Sync engine (psycopg2)
+    # Sync engine (psycopg2). CONN_SCHEME defaults to cockroachdb (Route A,
+    # uses sqlalchemy-cockroachdb dialect). Set to postgresql for Route B
+    # (treats CockroachDB as Postgres, no dialect or patch needed).
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-      cockroachdb://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable
+      ${CONN_SCHEME:-cockroachdb}://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable
     AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
     AIRFLOW__CORE__LOAD_EXAMPLES: "${AIRFLOW_LOAD_EXAMPLES:-false}"
     # Airflow 3.x moved secret_key from [webserver] to [api]
@@ -47,6 +50,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USER:-admin}:admin"
     # Pre-configure the CockroachDB connection for example DAGs
     AIRFLOW_CONN_COCKROACHDB_DEFAULT: "postgresql://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable"
+    # Passed through so sitecustomize.py can decide whether to patch PGDialect
+    CONN_SCHEME: ${CONN_SCHEME:-cockroachdb}
   volumes:
     - ../examples/dags:/opt/airflow/dags
     - ../src:/opt/airflow/src
@@ -85,6 +90,7 @@ services:
     container_name: crdb-airflow-init
     environment:
       - CRDB_ISOLATION=${CRDB_ISOLATION:-serializable}
+      - CONN_SCHEME=${CONN_SCHEME:-cockroachdb}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -108,6 +114,20 @@ services:
           echo "Enabling READ COMMITTED isolation..."
           cockroach sql --insecure --host=cockroachdb:26257 -e "SET CLUSTER SETTING sql.txn.read_committed_isolation.enabled = true";
           cockroach sql --insecure --host=cockroachdb:26257 -e "ALTER DATABASE ${AIRFLOW_METADATA_DB:-airflow} SET default_transaction_isolation = 'read committed'";
+        fi
+        if [ "$${CONN_SCHEME}" = "postgresql" ]; then
+          echo "CONN_SCHEME=postgresql: creating stub advisory lock UDFs..."
+          # Airflow's db migrate grabs a session-level pg_advisory_lock(1)
+          # to serialize migrations. CockroachDB only has transaction-level
+          # advisory locks (session-level raises SQLSTATE 42883). These
+          # no-op stubs let the migration lock call succeed. This makes
+          # migration locking a no-op, which is fine for a single init
+          # container but means concurrent migrations are unprotected.
+          cockroach sql --insecure --host=cockroachdb:26257 --database=${AIRFLOW_METADATA_DB:-airflow} -e "
+            CREATE OR REPLACE FUNCTION pg_advisory_lock(id INT8) RETURNS VOID LANGUAGE SQL AS 'SELECT NULL';
+            CREATE OR REPLACE FUNCTION pg_advisory_unlock(id INT8) RETURNS BOOL LANGUAGE SQL AS 'SELECT true';
+          "
+          echo "Stub UDFs created in ${AIRFLOW_METADATA_DB:-airflow}."
         fi
         echo "Database '${AIRFLOW_METADATA_DB:-airflow}' created and configured."
     depends_on:

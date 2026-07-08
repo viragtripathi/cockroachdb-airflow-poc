@@ -74,6 +74,7 @@ echo ""
 # Command-line env vars take precedence over .env file (same as docker-compose).
 SAVED_CRDB_ISOLATION="${CRDB_ISOLATION:-}"
 SAVED_AIRFLOW_METADATA_DB="${AIRFLOW_METADATA_DB:-}"
+SAVED_CONN_SCHEME="${CONN_SCHEME:-}"
 
 if [ -f docker/.env ]; then
     set -a
@@ -89,10 +90,15 @@ fi
 if [ -n "$SAVED_AIRFLOW_METADATA_DB" ]; then
     AIRFLOW_METADATA_DB="$SAVED_AIRFLOW_METADATA_DB"
 fi
+if [ -n "$SAVED_CONN_SCHEME" ]; then
+    CONN_SCHEME="$SAVED_CONN_SCHEME"
+fi
 
 AIRFLOW_METADATA_DB="${AIRFLOW_METADATA_DB:-airflow}"
 CRDB_ISOLATION="${CRDB_ISOLATION:-serializable}"
+CONN_SCHEME="${CONN_SCHEME:-cockroachdb}"
 echo "Metadata database: ${AIRFLOW_METADATA_DB}"
+echo "Connection scheme: ${CONN_SCHEME}"
 echo "Isolation mode: ${CRDB_ISOLATION}"
 echo ""
 
