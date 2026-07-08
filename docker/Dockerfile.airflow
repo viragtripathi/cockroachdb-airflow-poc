@@ -4,7 +4,7 @@
 # Extends the official Airflow image to include:
 #   - sqlalchemy-cockroachdb (CockroachDB SQLAlchemy dialect)
 #   - psycopg2-binary (sync driver for CockroachDB dialect)
-#   - asyncpg (async driver — required by Airflow 3.x async engine)
+#   - asyncpg (async driver, required by the Airflow 3.x async engine)
 #
 # All versions are parameterized via build args.
 ###############################################################################

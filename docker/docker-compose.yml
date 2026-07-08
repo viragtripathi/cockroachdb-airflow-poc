@@ -2,7 +2,7 @@
 # CockroachDB + Apache Airflow PoC
 #
 # Demonstrates CockroachDB as a metadata backend for Apache Airflow 3.x.
-# All versions are parameterized via .env file — nothing is hardcoded.
+# All versions are parameterized via .env file; nothing is hardcoded.
 #
 # Usage:
 #   docker compose up -d
@@ -46,7 +46,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     AIRFLOW__LOGGING__LOGGING_LEVEL: ${AIRFLOW_LOGGING_LEVEL:-INFO}
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-    # SimpleAuthManager (default in Airflow 3.x) — users configured via env var
+    # SimpleAuthManager (default in Airflow 3.x); users configured via env var
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USER:-admin}:admin"
     # Pre-configure the CockroachDB connection for example DAGs
     AIRFLOW_CONN_COCKROACHDB_DEFAULT: "postgresql://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable"
