@@ -1,197 +1,108 @@
-# CockroachDB + Apache Airflow Integration PoC
+# CockroachDB + Apache Airflow PoC
 
-Proof-of-concept for using CockroachDB with Apache Airflow 3.x in two ways:
+A proof of concept that runs Apache Airflow 3.x with CockroachDB as the metadata
+database. It exists to test and demonstrate a small set of upstream changes, not to be
+deployed as-is. One `docker compose up` gives you CockroachDB v26.3, Airflow 3.2.1 with
+two schedulers, and a validation script that exercises the whole thing, including an HA
+stress test.
 
-1. **Metadata Backend** — Replace PostgreSQL as Airflow's internal database
-2. **Data Source** — Query/write CockroachDB from DAG workflows via a provider package
+## Where the real fixes live
 
-> **Status:** Proof-of-concept, not a supported product. The integration works end-to-end on Airflow 3.2.1 + CockroachDB v25.4 LTS with the workarounds documented here. The MySQL-style `timestampdiff()` workaround was upstreamed in [`cockroachdb/sqlalchemy-cockroachdb#301`](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301) and ships in `sqlalchemy-cockroachdb >= 2.0.4`. For the remaining items see Airflow [discussion #65453](https://github.com/apache/airflow/discussions/65453).
+Everything CockroachDB-specific is being upstreamed. This repo is the test bed.
 
-## Motivation
+| Change | Where | Status |
+|---|---|---|
+| `timestampdiff()` compilation | [sqlalchemy-cockroachdb #301](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301) | Merged, ships in 2.0.4 |
+| Async engine URI for `cockroachdb://` | [apache/airflow #69260](https://github.com/apache/airflow/pull/69260) | Open |
+| task_instance UUID migration without pgcrypto | [apache/airflow #69555](https://github.com/apache/airflow/pull/69555) | Open |
+| Scheduler survives serialization conflicts (40001) | [apache/airflow #69556](https://github.com/apache/airflow/pull/69556) | Open |
+| HA advisory lock coordination on CockroachDB | [apache/airflow #69557](https://github.com/apache/airflow/pull/69557) | Open |
 
-Apache Airflow officially supports PostgreSQL, MySQL, and SQLite as metadata backends. CockroachDB is PostgreSQL wire-compatible and offers significant advantages for Airflow deployments:
+Until the Airflow PRs merge and ship in a release, this stack applies them as a small
+patch (`docker/patches/airflow-crdb-compat.patch`, four files) on top of the official
+Airflow 3.2.1 image. The patch is literally the diff of those PRs. When they land, it
+goes away.
 
-- **Built-in high availability**: No need for PostgreSQL replication/failover infrastructure
-- **Horizontal scalability**: Scales writes across nodes for large Airflow deployments
-- **Multi-region support**: CockroachDB's geo-partitioned data enables multi-region Airflow setups
-- **Simplified infrastructure**: One database instead of managing separate PostgreSQL and application databases
+## Two ways to connect
 
-This PoC validates both integration paths and provides the foundation for
-upstream contributions and a self-maintained compatibility layer.
+The stack supports both, switched by `CONN_SCHEME` in `docker/.env`.
 
-## Project Structure
+**Route A, the default: `cockroachdb://` plus the patch.** Airflow uses the
+sqlalchemy-cockroachdb dialect and the patched code paths. This is a preview of what
+stock Airflow will do once the PRs merge. The full validation matrix passes under both
+SERIALIZABLE and READ COMMITTED, two schedulers, zero crashes.
 
-```
-cockroachdb-airflow-poc/
-├── README.md
-├── LICENSE
-├── docker/
-│   ├── docker-compose.yml                 # Full stack: CockroachDB + Airflow
-│   └── Dockerfile.airflow                 # Custom Airflow image with CRDB dialect
-├── src/
-│   ├── compatibility/                     # CockroachDB compatibility layer
-│   │   ├── retry_middleware.py            # Transaction retry on 40001 errors
-│   │   └── migration_utils.py             # Audit Airflow migrations for CRDB compat
-│   ├── provider/                          # Airflow provider package prototype
-│   │   ├── hooks/cockroachdb.py           # CockroachDB Hook (DbApiHook)
-│   │   ├── dialects/cockroachdb.py        # CockroachDB Dialect (upsert, introspection)
-│   │   └── assets/cockroachdb.py          # URI sanitizer
-│   └── tests/
-│       └── test_cockroachdb_hook.py
-├── plugins/                               # Airflow plugins dir (bind-mounted; empty by default)
-├── scripts/
-│   ├── validate-poc.sh                    # End-to-end PoC validation
-│   └── audit-airflow-migrations.sh        # Scan migrations for CRDB incompatibilities
-└── examples/
-    └── dags/
-        ├── example_cockroachdb_dag.py
-        └── example_cockroachdb_health_check.py
-```
+**Route B: `postgresql://`, no patch.** Airflow is told it is talking to Postgres.
+This needs two shims the init container sets up automatically: stub
+`pg_advisory_lock`/`pg_advisory_unlock` functions (Airflow's migration lock calls the
+session-level variants, which CockroachDB does not have) and a version-string shim
+(SQLAlchemy's Postgres dialect cannot parse CockroachDB's `version()` output). It passes
+validation under READ COMMITTED. Under SERIALIZABLE load the schedulers crash on
+serialization conflicts, because the fix for that is in the patch this route skips.
+Use this route only to see what works without any Airflow changes.
 
-## Quick Start
+## Requirements
 
-### Prerequisites
+- Docker with about 4 GB free for containers
+- CockroachDB v26.3 or later. The HA scheduler coordination uses transaction-scoped
+  advisory locks, which first appear in 26.3. The compose file defaults to the
+  `cockroachdb/cockroach-unstable` image until 26.3 reaches GA.
 
-- Docker and Docker Compose
-- At least 4GB RAM available for containers
-- CockroachDB v24.1+ (v25.2+ recommended for LTS support)
-
-### 1. Configure Versions
-
-Copy the environment template, then optionally override any of the version pins:
+## Quick start
 
 ```bash
 cp docker/.env.example docker/.env
-```
-
-Defaults (work out of the box):
-
-```bash
-# docker/.env
-COCKROACHDB_VERSION=v25.4.10
-AIRFLOW_VERSION=3.2.1
-AIRFLOW_PYTHON_VERSION=3.12
-SQLALCHEMY_COCKROACHDB_VERSION=2.0.4
-```
-
-### 2. Start the Stack
-
-```bash
 cd docker
 docker compose up -d
+../scripts/validate-poc.sh
 ```
 
-This starts:
-- **CockroachDB** (single-node, insecure) on port 26257 (SQL) and 8081 (DB Console)
-- **Airflow 3.x** (API server + scheduler + dag-processor + triggerer) on port 8080
+Airflow UI at http://localhost:8080 (admin, password in `docker/.env`), CockroachDB
+console at http://localhost:8081.
 
-**Note on Airflow 3.x architecture**: Airflow 3.x separates the webserver into an `api-server`, and requires a dedicated `dag-processor` for DAG file parsing. Both are included in this stack.
+The init container creates the database and a dedicated non-root `airflow` user. Do not
+connect Airflow as root: CockroachDB pins root sessions to SERIALIZABLE, so isolation
+settings would silently not apply.
 
-The init process automatically:
-1. Creates the `airflow` database in CockroachDB
-2. Configures `serial_normalization = sql_sequence` for PostgreSQL compatibility
-3. Enables READ COMMITTED isolation (avoids scheduler crashes on 40001 errors)
-4. Creates `uuid_generate_v7()` compatibility function
-5. Runs `airflow db migrate` against CockroachDB (retries on DDL visibility race)
-6. Configures admin user via SimpleAuthManager (Airflow 3.x)
+### Knobs
 
-`timestampdiff()` no longer needs an Airflow-side workaround — `sqlalchemy-cockroachdb >= 2.0.4` compiles it natively.
+All in `docker/.env`:
 
-### 3. Access the UIs
+| Variable | Default | What it does |
+|---|---|---|
+| `COCKROACHDB_IMAGE` / `COCKROACHDB_VERSION` | `cockroachdb/cockroach-unstable` / `v26.3.0-beta.2` | Which CockroachDB to run |
+| `CONN_SCHEME` | `cockroachdb` | `cockroachdb` = Route A, `postgresql` = Route B |
+| `APPLY_CRDB_PATCH` | `true` | Set `false` to build the Airflow image without the patch (Route B) |
+| `CRDB_ISOLATION` | `serializable` | `read_committed` switches the database default for the airflow user |
 
-| Service              | URL                     | Credentials |
-|----------------------|-------------------------|-------------|
-| Airflow Web UI       | http://localhost:8080    | admin / (see api-server logs) |
-| CockroachDB Console  | http://localhost:8081    | N/A         |
+## What the validation covers
 
-### 4. Validate
+`scripts/validate-poc.sh` checks, among other things: fresh `airflow db migrate` with no
+manual setup, the async engine URI being derived rather than hand-configured, a stress
+run of 8 concurrent DAG runs (240 tasks) against two schedulers with zero scheduler
+restarts, advisory lock usage visible in `pg_locks`, and serialization conflict counts
+from the scheduler logs. `scripts/test-migration-0042.py` additionally runs the
+task_instance UUID migration up and down against a seeded database.
 
-```bash
-./scripts/validate-poc.sh
+## Repo layout
+
+```
+docker/            compose stack, Airflow image, the compat patch
+scripts/           validate-poc.sh, migration harness, migration audit
+examples/dags/     demo, health check, and stress DAGs
+src/provider/      prototype hook/dialect for using CockroachDB as a data source in DAGs
+src/compatibility/ retry middleware and migration audit helpers (pre-date the upstream PRs)
 ```
 
-### 5. Run Example DAGs
+## Known limitations
 
-In the Airflow UI, enable and trigger the `cockroachdb_demo` DAG.
-
-## CockroachDB Compatibility Configuration
-
-### Metadata Backend Configuration
-
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| `serial_normalization` | `sql_sequence` | Match PostgreSQL SERIAL behavior |
-| Isolation level | `READ COMMITTED` | Avoid 40001 scheduler crashes (SERIALIZABLE causes `WriteTooOldError` under contention) |
-| `uuid_generate_v7()` UDF | `gen_random_uuid()` wrapper | Airflow 3.x migration compat |
-| `SQL_ALCHEMY_CONN_ASYNC` | `cockroachdb+asyncpg://` | Airflow 3.x requires async engine (auto-derivation doesn't support `cockroachdb://` scheme) |
-| `timestampdiff()` | Compiled natively by `sqlalchemy-cockroachdb >= 2.0.4` | Translates to `TRUNC(CAST(EXTRACT(EPOCH FROM ...) AS NUMERIC) <factor>)`, matching MySQL's integer-truncation semantics |
-
-### Data Source Configuration
-
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| Connection URI | `postgresql://` or `cockroachdb://` | CockroachDB accepts both via wire compatibility |
-| Connection type | `postgres` in Airflow UI | Use existing PostgreSQL connection type |
-| Transaction retry | Built into Hook | `retry_middleware.py` handles 40001 with exponential backoff |
-
-## Current Status
-
-### What Works
-
-- ✅ `airflow db migrate` — 68 tables created successfully
-- ✅ DAG parsing and scheduling
-- ✅ Task execution (LocalExecutor) with correct output
-- ✅ Airflow UI (API server, DAG grid)
-- ✅ Example DAGs with CockroachDB CRUD + distributed SQL
-- ✅ MySQL-style `timestampdiff()` (compiled natively by `sqlalchemy-cockroachdb >= 2.0.4`)
-- ✅ CockroachDB provider package (Hook, Dialect, Asset URI)
-
-### Known Limitations
-
-- ⚠️ Scheduler crashes under write contention (40001 errors) — READ COMMITTED reduces but doesn't eliminate. Proper fix requires transaction retry logic in Airflow's scheduler
-- ⚠️ Advisory locks (`pg_advisory_lock`) not available — affects multi-scheduler HA coordination efficiency. Single-scheduler deployments are unaffected
-
-## Auditing Airflow Migrations
-
-Scan Airflow's Alembic migrations for CockroachDB-incompatible patterns:
-
-```bash
-./scripts/audit-airflow-migrations.sh 3.2.1
-```
-
-## Running Tests
-
-```bash
-cd src
-python -m pytest tests/ -v
-```
-
-## Integration Approaches
-
-| Approach | Description | Effort | Risk |
-|----------|-------------|--------|------|
-| **A: Upstream PR** | CockroachDB as a supported Airflow metadata backend | High | Medium-High |
-| **B: Provider Package** | CockroachDB as a data source in DAGs | Low | Low |
-
-**Recommended path**: A + B in parallel. The narrowly-scoped Airflow changes for Path A are being discussed upstream (see _Next Steps_); the data-source provider for Path B is prototyped here.
-
-## Next Steps
-
-1. ~~Run the PoC~~ ✅ — `airflow db migrate` succeeds, DAGs execute correctly
-2. ~~Audit migrations~~ ✅ — 111 files audited, 12 findings, all handled
-3. ~~Submit sqlalchemy-cockroachdb PR~~ ✅ — [PR #301](https://github.com/cockroachdb/sqlalchemy-cockroachdb/pull/301) merged; `@compiles(timestampdiff, "cockroachdb")` ships in `sqlalchemy-cockroachdb >= 2.0.4`
-4. ~~Open Airflow GitHub Discussion~~ ✅ — [#65453](https://github.com/apache/airflow/discussions/65453); maintainer guidance was to take it to the devlist first
-5. ~~Send `[DISCUSS]` to `dev@airflow.apache.org`~~ ✅ — sent 2026-04-18; thread at [lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc](https://lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc). Awaiting maintainer feedback before drafting the three PRs.
-6. **Submit Airflow PRs after devlist signal** — three narrow PRs framed as PostgreSQL-compatibility improvements
-7. **Track CockroachDB advisory-lock support** — would enable scheduler HA coordination without retry-loop overhead
+- `airflow db migrate --use-migration-files` stops on an old Airflow migration that adds
+  a primary key to a table CockroachDB created with a hidden rowid key. The default
+  migration path does not hit this and is the one validated here.
+- Route B is a compatibility experiment, not a recommendation. See above.
 
 ## References
 
-- [CockroachDB PostgreSQL Compatibility](https://www.cockroachlabs.com/docs/stable/postgresql-compatibility)
-- [Airflow Database Backend Docs](https://airflow.apache.org/docs/apache-airflow/stable/howto/set-up-database.html)
 - [sqlalchemy-cockroachdb](https://github.com/cockroachdb/sqlalchemy-cockroachdb)
-- [CockroachDB Issue #32537 — Airflow ORM Support](https://github.com/cockroachdb/cockroach/issues/32537)
-- [Airflow Issue #14438 — CockroachDB DDL Issues](https://github.com/apache/airflow/issues/14438)
-- [Airflow Issue #46175 — New DB Backend Request (Rejected)](https://github.com/apache/airflow/issues/46175)
-- [Airflow Issue #40882 — Retry Logic Bugs](https://github.com/apache/airflow/issues/40882)
-- [Airflow Custom Provider Guide](https://airflow.apache.org/docs/apache-airflow-providers/howto/create-custom-providers.html)
+- [Airflow devlist thread for these changes](https://lists.apache.org/thread/t6jo4th3sn23jmr34m6gcxzw4k8mo4pc)
+- [CockroachDB PostgreSQL compatibility](https://www.cockroachlabs.com/docs/stable/postgresql-compatibility)
