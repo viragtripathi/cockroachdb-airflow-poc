@@ -35,15 +35,43 @@ ENV PYTHONPATH="/opt/airflow/src:${PYTHONPATH}"
 
 # Apply CockroachDB compatibility patch from apache/airflow upstream PRs.
 # Set APPLY_CRDB_PATCH=false to skip this and run with plain postgresql:// instead.
+#
+# The patch step adapts to the Airflow version in the base image:
+#   - the base patch applies to both 3.2.1 and 3.3.0;
+#   - the upsert patch only applies where build_upsert_stmt exists (3.3.0+);
+#   - 3.2.1 spells the metrics helper "Stats" while 3.3.0 uses "stats", so the
+#     one metric line the base patch adds is re-spelled on 3.2.1 to avoid a
+#     NameError at runtime.
 ARG APPLY_CRDB_PATCH=true
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends patch && rm -rf /var/lib/apt/lists/*
 USER airflow
 COPY patches/airflow-crdb-compat.patch /tmp/airflow-crdb-compat.patch
+COPY patches/airflow-crdb-upsert-3.3.patch /tmp/airflow-crdb-upsert-3.3.patch
 RUN if [ "$APPLY_CRDB_PATCH" = "true" ]; then \
         cd $(python -c "import airflow, os; print(os.path.dirname(os.path.dirname(airflow.__file__)))") \
+        && echo "=== Applying base CockroachDB compatibility patch ===" \
         && patch -p3 --forward < /tmp/airflow-crdb-compat.patch \
-        && python -c "from airflow.utils.sqlalchemy import is_serialization_error; print('patch OK')" \
+        && if grep -q "def build_upsert_stmt" airflow/utils/sqlalchemy.py; then \
+            echo "=== Airflow 3.3.0+ detected, applying upsert patch ===" \
+            && patch -p3 --forward < /tmp/airflow-crdb-upsert-3.3.patch \
+            && grep -q '"postgresql", "cockroachdb"' airflow/utils/sqlalchemy.py \
+            && echo "Upsert patch applied successfully"; \
+        else \
+            echo "=== Airflow 3.2.1 detected, skipping upsert patch (build_upsert_stmt not present) ==="; \
+        fi \
+        && if grep -q 'Stats.incr("scheduler.critical_section_busy")' airflow/jobs/scheduler_job_runner.py; then \
+            echo "=== Airflow 3.2.1 Stats spelling detected, adapting stats.incr to Stats.incr ===" \
+            && sed -i 's/stats\.incr("scheduler.critical_section_conflict")/Stats.incr("scheduler.critical_section_conflict")/' airflow/jobs/scheduler_job_runner.py \
+            && echo "Stats spelling adapted for 3.2.1"; \
+        else \
+            echo "=== Airflow 3.3.0+ lowercase stats spelling detected, no adaptation needed ==="; \
+        fi \
+        && python -m py_compile airflow/settings.py \
+        && python -m py_compile airflow/utils/sqlalchemy.py \
+        && python -m py_compile airflow/jobs/scheduler_job_runner.py \
+        && python -m py_compile airflow/migrations/versions/0042_3_0_0_add_uuid_primary_key_to_task_instance_.py \
+        && python -c "from airflow.utils.sqlalchemy import is_serialization_error; print('is_serialization_error import OK')" \
         && grep -q '"cockroachdb": "asyncpg"' airflow/settings.py; \
     else \
         echo "APPLY_CRDB_PATCH=false, skipping patch (postgresql:// route)"; \

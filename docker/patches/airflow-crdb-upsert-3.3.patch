@@ -1,0 +1,22 @@
+diff --git a/airflow-core/src/airflow/utils/sqlalchemy.py b/airflow-core/src/airflow/utils/sqlalchemy.py
+index c47d8fd479..62e3f8cc8c 100644
+--- a/airflow-core/src/airflow/utils/sqlalchemy.py
++++ b/airflow-core/src/airflow/utils/sqlalchemy.py
+@@ -83,7 +83,7 @@ def build_upsert_stmt(
+     :raises ValueError: if the dialect does not support a known upsert syntax
+     """
+     stmt: MySQLInsert | PostgreSQLInsert | SQLiteInsert
+-    if dialect == "postgresql":
++    if dialect in ("postgresql", "cockroachdb"):
+         from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+         stmt = pg_insert(model).values(**values)
+@@ -101,7 +101,7 @@ def build_upsert_stmt(
+     else:
+         raise ValueError(
+             f"Unsupported database dialect '{dialect}' for upsert. "
+-            "Supported dialects are: postgresql, mysql, sqlite."
++            "Supported dialects are: postgresql, cockroachdb, mysql, sqlite."
+         )
+     return stmt
+

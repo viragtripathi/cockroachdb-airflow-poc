@@ -29,7 +29,7 @@ x-airflow-common: &airflow-common
     # uses sqlalchemy-cockroachdb dialect). Set to postgresql for Route B
     # (treats CockroachDB as Postgres, no dialect or patch needed).
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
-      ${CONN_SCHEME:-cockroachdb}://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable
+      ${CONN_SCHEME:-cockroachdb}://airflow@cockroachdb:26257/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable
     AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR:-LocalExecutor}
     AIRFLOW__CORE__LOAD_EXAMPLES: "${AIRFLOW_LOAD_EXAMPLES:-false}"
     # Airflow 3.x moved secret_key from [webserver] to [api]
@@ -49,7 +49,7 @@ x-airflow-common: &airflow-common
     # SimpleAuthManager (default in Airflow 3.x); users configured via env var
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USER:-admin}:admin"
     # Pre-configure the CockroachDB connection for example DAGs
-    AIRFLOW_CONN_COCKROACHDB_DEFAULT: "postgresql://airflow@cockroachdb:${COCKROACHDB_SQL_PORT:-26257}/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable"
+    AIRFLOW_CONN_COCKROACHDB_DEFAULT: "postgresql://airflow@cockroachdb:26257/${AIRFLOW_METADATA_DB:-airflow}?sslmode=disable"
     # Passed through so sitecustomize.py can decide whether to patch PGDialect
     CONN_SCHEME: ${CONN_SCHEME:-cockroachdb}
   volumes:

@@ -221,11 +221,19 @@ echo ""
 echo "--- Migration Path: ORM (default) and Files (--use-migration-files) ---"
 
 # Check 1a: ORM path (default, no --use-migration-files)
-# Proven by airflow-init exiting 0 on a fresh database
-INIT_EXIT=$(docker compose -f docker/docker-compose.yml ps -a --format '{{.Service}} {{.ExitCode}}' 2>/dev/null | grep '^airflow-init' | awk '{print $2}')
-check "ORM migration path succeeded (airflow-init exit code)" \
-    "echo $INIT_EXIT" \
-    "0"
+# Proven by airflow-init exiting 0 on a fresh database. Some compose providers
+# do not retain the exited one-shot container; in that case fall back to the
+# schema itself as proof that the ORM migration ran.
+INIT_EXIT=$(docker compose -f docker/docker-compose.yml ps -a --format '{{.Service}} {{.ExitCode}}' 2>/dev/null | grep '^airflow-init' | awk '{print $2}' || true)
+if [ -n "$INIT_EXIT" ]; then
+    check "ORM migration path succeeded (airflow-init exit code)" \
+        "echo $INIT_EXIT" \
+        "0"
+else
+    check "ORM migration path succeeded (alembic_version stamped)" \
+        "docker compose -f docker/docker-compose.yml exec -T cockroachdb cockroach sql --insecure --database=${AIRFLOW_METADATA_DB} -e \"SELECT count(*) FROM alembic_version\" | grep -E '^[0-9]+$' | head -1" \
+        "1"
+fi
 
 # Verify the ORM path created task_instance with UUID id column
 check "task_instance.id is UUID in main DB (ORM path)" \

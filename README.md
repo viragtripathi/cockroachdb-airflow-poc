@@ -2,9 +2,9 @@
 
 A proof of concept that runs Apache Airflow 3.x with CockroachDB as the metadata
 database. It exists to test and demonstrate a small set of upstream changes, not to be
-deployed as-is. One `docker compose up` gives you CockroachDB v26.3, Airflow 3.3.0 with
-two schedulers, and a validation script that exercises the whole thing, including an HA
-stress test.
+deployed as-is. One `docker compose up` gives you CockroachDB v26.3, Airflow 3.3.0 (or
+3.2.1, toggled via `AIRFLOW_VERSION` in `docker/.env`) with two schedulers, and a
+validation script that exercises the whole thing, including an HA stress test.
 
 ## Where the real fixes live
 
@@ -17,11 +17,13 @@ Everything CockroachDB-specific is being upstreamed. This repo is the test bed.
 | task_instance UUID migration without pgcrypto | [apache/airflow #69555](https://github.com/apache/airflow/pull/69555) | Open |
 | Scheduler survives serialization conflicts (40001) | [apache/airflow #69556](https://github.com/apache/airflow/pull/69556) | Open |
 | HA advisory lock coordination on CockroachDB | [apache/airflow #69557](https://github.com/apache/airflow/pull/69557) | Open |
+| Task-start upsert on cockroachdb (3.3.0 regression for the dialect) | [apache/airflow #69640](https://github.com/apache/airflow/pull/69640) | Open |
 
 Until the Airflow PRs merge and ship in a release, this stack applies them as a small
-patch (`docker/patches/airflow-crdb-compat.patch`, four files) on top of the official
-Airflow 3.3.0 image. The patch is literally the diff of those PRs. When they land, it
-goes away.
+patch on top of the official Airflow image. The build adapts to the Airflow version:
+`airflow-crdb-compat.patch` (base, four files) for 3.2.1 and 3.3.0, plus
+`airflow-crdb-upsert-3.3.patch` (one extra sqlalchemy.py hunk) only on 3.3.0. The patches
+are literally the diffs of those PRs. When they land, they go away.
 
 ## Two ways to connect
 
@@ -47,6 +49,8 @@ Use this route only to see what works without any Airflow changes.
 - CockroachDB v26.3 or later. The HA scheduler coordination uses transaction-scoped
   advisory locks, which first appear in 26.3. The compose file defaults to the
   `cockroachdb/cockroach-unstable` image until 26.3 reaches GA.
+- The stack is tested against Airflow 3.3.0 (default) and 3.2.1, toggled via
+  `AIRFLOW_VERSION` in `docker/.env`.
 
 ## Quick start
 
@@ -70,6 +74,7 @@ All in `docker/.env`:
 
 | Variable | Default | What it does |
 |---|---|---|
+| `AIRFLOW_VERSION` | `3.3.0` | `3.2.1` or `3.3.0` |
 | `COCKROACHDB_IMAGE` / `COCKROACHDB_VERSION` | `cockroachdb/cockroach-unstable` / `v26.3.0-beta.2` | Which CockroachDB to run |
 | `CONN_SCHEME` | `cockroachdb` | `cockroachdb` = Route A, `postgresql` = Route B |
 | `APPLY_CRDB_PATCH` | `true` | Set `false` to build the Airflow image without the patch (Route B) |
