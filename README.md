@@ -2,7 +2,7 @@
 
 A proof of concept that runs Apache Airflow 3.x with CockroachDB as the metadata
 database. It exists to test and demonstrate a small set of upstream changes, not to be
-deployed as-is. One `docker compose up` gives you CockroachDB v26.3, Airflow 3.2.1 with
+deployed as-is. One `docker compose up` gives you CockroachDB v26.3, Airflow 3.3.0 with
 two schedulers, and a validation script that exercises the whole thing, including an HA
 stress test.
 
@@ -20,7 +20,7 @@ Everything CockroachDB-specific is being upstreamed. This repo is the test bed.
 
 Until the Airflow PRs merge and ship in a release, this stack applies them as a small
 patch (`docker/patches/airflow-crdb-compat.patch`, four files) on top of the official
-Airflow 3.2.1 image. The patch is literally the diff of those PRs. When they land, it
+Airflow 3.3.0 image. The patch is literally the diff of those PRs. When they land, it
 goes away.
 
 ## Two ways to connect
