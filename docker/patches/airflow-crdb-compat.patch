@@ -88,75 +88,46 @@ index 680d97301f..68cfaa390e 100644
          return postgresql.UUID(as_uuid=False)
      # For other databases, use String(36) to match UUID format
      return sa.String(36)
-@@ -275,11 +276,90 @@ def upgrade():
+@@ -275,11 +276,61 @@ def upgrade():
          with op.batch_alter_table("task_instance") as batch_op:
              batch_op.drop_constraint("task_instance_pkey", type_="primary")
  
 +    elif dialect_name == "cockroachdb":
-+        from uuid6 import uuid7
++        # CockroachDB cannot run the PL/pgSQL uuid_generate_v7() helper defined
++        # for PostgreSQL above: PL/pgSQL function bodies fail there with
++        # SQLSTATE 0A000 (https://github.com/cockroachdb/cockroach/issues/110080).
++        # Define a plain SQL function assembling the UUIDv7 hex layout directly,
++        # mirroring the MySQL branch, and backfill server side in batches.
++        op.execute(
++            """
++            CREATE FUNCTION uuid_v7_from_ts(ts TIMESTAMPTZ) RETURNS UUID VOLATILE LANGUAGE SQL AS $$
++              SELECT (
++                lpad(to_hex((extract(epoch FROM ts) * 1000)::INT8), 12, '0')
++                || '7' || substr(replace(gen_random_uuid()::STRING, '-', ''), 1, 3)
++                || '8' || substr(replace(gen_random_uuid()::STRING, '-', ''), 4, 15)
++              )::UUID
++            $$
++            """
++        )
 +
-+        # CockroachDB has no pgcrypto extension, so generate UUID v7 values
-+        # client-side like the sqlite path. There is no sqlite-style rowid, so
-+        # paginate over the existing composite primary key; every row needs an
-+        # id at this point, which keeps the scan a single forward pass.
-+        select_stmt = text(
-+            """
-+            SELECT dag_id, task_id, run_id, map_index
-+            FROM task_instance
-+            WHERE (dag_id, task_id, run_id, map_index) > (:last_dag_id, :last_task_id, :last_run_id, :last_map_index)
-+            ORDER BY dag_id, task_id, run_id, map_index
-+            LIMIT :batch_size
-+            """
-+        )
-+        first_select_stmt = text(
-+            """
-+            SELECT dag_id, task_id, run_id, map_index
-+            FROM task_instance
-+            ORDER BY dag_id, task_id, run_id, map_index
-+            LIMIT :batch_size
-+            """
-+        )
-+        update_stmt = text(
-+            """
-+            UPDATE task_instance
-+            SET id = :uuid
-+            WHERE dag_id = :dag_id AND task_id = :task_id
-+              AND run_id = :run_id AND map_index = :map_index
-+            """
-+        )
 +        batch_num = 0
-+        last_key = None
 +        while True:
 +            batch_num += 1
-+            if last_key is None:
-+                rows = conn.execute(first_select_stmt.bindparams(batch_size=batch_size)).fetchall()
-+            else:
-+                rows = conn.execute(
-+                    select_stmt.bindparams(
-+                        batch_size=batch_size,
-+                        last_dag_id=last_key.dag_id,
-+                        last_task_id=last_key.task_id,
-+                        last_run_id=last_key.run_id,
-+                        last_map_index=last_key.map_index,
-+                    )
-+                ).fetchall()
-+            if not rows:
-+                break
-+            conn.execute(
-+                update_stmt,
-+                [
-+                    {
-+                        "uuid": str(uuid7()),
-+                        "dag_id": row.dag_id,
-+                        "task_id": row.task_id,
-+                        "run_id": row.run_id,
-+                        "map_index": row.map_index,
-+                    }
-+                    for row in rows
-+                ],
++            result = conn.execute(
++                text(
++                    """
++                    UPDATE task_instance
++                    SET id = uuid_v7_from_ts(coalesce(queued_dttm, start_date, clock_timestamp()))
++                    WHERE id IS NULL
++                    LIMIT :batch_size
++                    """
++                ).bindparams(batch_size=batch_size)
 +            )
-+            last_key = rows[-1]
-+            print(f"Migrated {len(rows)} task_instance rows in batch {batch_num}...")
++            if not result.rowcount:
++                break
++            print(f"Migrated {result.rowcount} task_instance rows in batch {batch_num}...")
++
++        op.execute("DROP FUNCTION uuid_v7_from_ts")
 +
 +        for fk in ti_fk_constraints:
 +            op.drop_constraint(fk["fk"], fk["table"], type_="foreignkey")
@@ -183,7 +154,7 @@ index 680d97301f..68cfaa390e 100644
  
      # Create foreign key constraints
      create_foreign_keys()
-@@ -306,6 +386,17 @@ def downgrade():
+@@ -306,6 +357,17 @@ def downgrade():
          with op.batch_alter_table("task_instance") as batch_op:
              batch_op.drop_constraint("task_instance_composite_key", type_="unique")
  
